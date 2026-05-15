@@ -16,7 +16,9 @@ from .copilot import CopilotInvoker
 from .cursor import CursorInvoker
 from .gemini import GeminiInvoker
 from .kilocode import KilocodeInvoker
+from .letta import LettaInvoker
 from .opencode import OpenCodeInvoker
+from .pi import PiInvoker
 from .qwen import QwenInvoker
 
 _REGISTRY: dict[str, type[BaseInvoker]] = {
@@ -29,6 +31,8 @@ _REGISTRY: dict[str, type[BaseInvoker]] = {
     "kilocode": KilocodeInvoker,
     "augment": AugmentInvoker,
     "cursor": CursorInvoker,
+    "pi": PiInvoker,
+    "letta": LettaInvoker,
 }
 
 
@@ -79,4 +83,6 @@ __all__ = [
     "KilocodeInvoker",
     "AugmentInvoker",
     "CursorInvoker",
+    "PiInvoker",
+    "LettaInvoker",
 ]

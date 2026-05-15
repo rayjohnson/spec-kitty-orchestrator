@@ -149,6 +149,8 @@ agents:
 | `kilocode` | `kilocode` | no | Prompt as positional arg with `-a --yolo -j` |
 | `augment` | `auggie` | no | `--acp` mode; no JSON output |
 | `cursor` | `cursor` | no | Always wrapped with `timeout` to prevent hangs |
+| `pi` | `pi` | yes | Headless print mode with JSON events |
+| `letta` | `letta` | yes | Headless mode with JSON output |
 
 The orchestrator detects installed agents automatically at startup:
 
