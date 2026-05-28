@@ -89,6 +89,18 @@ def test_opencode_parses_jsonl_file_write_and_error_events() -> None:
     assert result.errors == ["review failed"]
 
 
+def test_opencode_parses_nested_error_events() -> None:
+    result = OpenCodeInvoker().parse_output(
+        '{"type":"error","error":{"name":"UnknownError","data":{"message":"Model not found: test/model"}}}\n',
+        "",
+        1,
+        0.5,
+    )
+
+    assert result.success is False
+    assert result.errors == ["Model not found: test/model"]
+
+
 def test_pi_builds_headless_json_commands(tmp_path: Path) -> None:
     invoker = PiInvoker()
 

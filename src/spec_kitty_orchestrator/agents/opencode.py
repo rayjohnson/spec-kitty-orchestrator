@@ -46,7 +46,16 @@ class OpenCodeInvoker(BaseInvoker):
                         if path:
                             files_modified.append(path)
                     if event.get("type") == "error":
-                        errors.append(str(event.get("message", "")))
+                        message = event.get("message")
+                        nested_error = event.get("error")
+                        if not message and isinstance(nested_error, dict):
+                            data = nested_error.get("data")
+                            if isinstance(data, dict):
+                                message = data.get("message")
+                            if not message:
+                                message = nested_error.get("message") or nested_error.get("name")
+                        if message:
+                            errors.append(str(message))
             except Exception:
                 pass
         if not success and not errors:
