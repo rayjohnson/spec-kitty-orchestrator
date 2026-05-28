@@ -13,6 +13,7 @@ This module has no dependencies on the host's internal packages.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -108,13 +109,15 @@ class HostClient:
         actor: str,
         policy_json: str | None = None,
         bin_path: str = _SPEC_KITTY_BIN,
+        history_repo_root: Path | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.actor = actor
         self.policy_json = policy_json
         self._bin = bin_path
+        self.history_repo_root = history_repo_root
 
-    def _call(self, args: list[str]) -> HostResponse:
+    def _call(self, args: list[str], repo_root: Path | None = None) -> HostResponse:
         """Invoke spec-kitty orchestrator-api with the given args.
 
         Runs: spec-kitty orchestrator-api <args>
@@ -133,13 +136,17 @@ class HostClient:
             RuntimeError: If subprocess fails entirely or output is not JSON.
         """
         cmd = [self._bin, "orchestrator-api"] + args
+        call_root = repo_root or self.repo_root
+        env = os.environ.copy()
+        env["SPECIFY_REPO_ROOT"] = str(call_root)
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                cwd=self.repo_root,
+                cwd=call_root,
+                env=env,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -269,6 +276,10 @@ class HostClient:
         to: str,
         note: str | None = None,
         review_ref: str | None = None,
+        force: bool = False,
+        evidence_json: str | None = None,
+        subtasks_complete: bool | None = None,
+        implementation_evidence_present: bool | None = None,
     ) -> TransitionData:
         """Emit a single lane transition for a WP.
 
@@ -280,6 +291,10 @@ class HostClient:
             to: Target lane name.
             note: Optional reason/note.
             review_ref: Optional review reference (for for_review->done).
+            force: Whether to force the transition.
+            evidence_json: Optional JSON evidence payload for done transitions.
+            subtasks_complete: Optional guard value for in_progress->for_review.
+            implementation_evidence_present: Optional guard value for in_progress->for_review.
         """
         args = [
             "transition",
@@ -294,6 +309,18 @@ class HostClient:
             args += ["--policy", self.policy_json]
         if review_ref:
             args += ["--review-ref", review_ref]
+        if force:
+            args.append("--force")
+        if evidence_json:
+            args += ["--evidence-json", evidence_json]
+        if subtasks_complete is not None:
+            args.append("--subtasks-complete" if subtasks_complete else "--no-subtasks-complete")
+        if implementation_evidence_present is not None:
+            args.append(
+                "--implementation-evidence-present"
+                if implementation_evidence_present
+                else "--no-implementation-evidence-present"
+            )
         resp = self._call(args)
         return TransitionData(**resp.data)
 
@@ -307,13 +334,16 @@ class HostClient:
             wp: Work package ID.
             note: Text of the history entry.
         """
-        resp = self._call([
-            "append-history",
-            "--mission", mission,
-            "--wp", wp,
-            "--actor", self.actor,
-            "--note", note,
-        ])
+        resp = self._call(
+            [
+                "append-history",
+                "--mission", mission,
+                "--wp", wp,
+                "--actor", self.actor,
+                "--note", note,
+            ],
+            repo_root=self.history_repo_root,
+        )
         return AppendHistoryData(**resp.data)
 
     def accept_mission(self, mission: str) -> AcceptMissionData:

@@ -11,10 +11,11 @@ import asyncio
 import logging
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .agents import get_invoker
 from .config import AgentSelectionConfig, OrchestratorConfig
-from .executor import TIMEOUT_EXIT_CODE, execute_agent, get_log_path
+from .executor import execute_agent, get_log_path
 from .host.client import HostClient, TransitionRejectedError, WPAlreadyClaimedError
 from .monitor import (
     classify_failure,
@@ -101,6 +102,7 @@ async def execute_and_advance(
             role="implementation",
             timeout_seconds=agent_cfg.timeout_seconds,
             log_file=log_file,
+            repo_root=_agent_repo_root(host, cfg),
         )
 
         if is_success(result):
@@ -145,7 +147,12 @@ async def execute_and_advance(
 
     # Transition to for_review
     try:
-        host.transition(mission, wp_id, "for_review", note=f"Implementation by '{impl_agent_id}' complete")
+        _transition_for_review(
+            host,
+            mission,
+            wp_id,
+            note=f"Implementation by '{impl_agent_id}' complete",
+        )
     except TransitionRejectedError as exc:
         logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
         _mark_failed(wp_exec, str(exc))
@@ -153,12 +160,10 @@ async def execute_and_advance(
         return
 
     # -- Review phase ------------------------------------------------------
-    # WP is in for_review. The reviewer runs while the WP *stays* in for_review.
-    # Allowed transitions from for_review:
-    #   for_review -> done          (reviewer approved)
-    #   for_review -> in_progress   (reviewer rejected; via start_review)
-    # in_progress -> done is NOT allowed, so start_review must NOT be called
-    # before running the review agent.
+    # Host contract drift:
+    # - legacy start-review means rejection/rework and returns in_progress
+    # - current start-review means reviewer claim and returns in_review
+    # Run review from for_review for compatibility, then adapt transitions.
 
     review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
     review_cycle = 0
@@ -184,16 +189,19 @@ async def execute_and_advance(
             role="review",
             timeout_seconds=agent_cfg.timeout_seconds,
             log_file=review_log,
+            repo_root=_agent_repo_root(host, cfg),
         )
 
         if is_success(review_result):
-            # Approved: for_review -> done  (this transition IS allowed)
             review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
             try:
-                host.transition(
-                    mission, wp_id, "done",
-                    note=f"Review approved by '{review_agent_id}'",
-                    review_ref=review_ref,
+                _transition_review_approved(
+                    host,
+                    mission,
+                    wp_id,
+                    review_agent_id,
+                    review_cycle,
+                    review_ref,
                 )
                 review_done = True
                 host.append_history(mission, wp_id, f"Review approved in cycle {review_cycle}")
@@ -212,7 +220,14 @@ async def execute_and_advance(
             logger.error("WP %s: review retry limit exceeded", wp_id)
             host.append_history(mission, wp_id, "FAILED: review retry limit exceeded")
             try:
-                host.transition(mission, wp_id, "blocked", note="Review cycle limit exceeded")
+                _host_transition(
+                    host,
+                    mission,
+                    wp_id,
+                    "blocked",
+                    note="Review cycle limit exceeded",
+                    force=True,
+                )
             except Exception:
                 pass
             break
@@ -223,12 +238,10 @@ async def execute_and_advance(
             f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
         )
 
-        # for_review -> in_progress via start_review (the right use of start_review:
-        # triggering a re-implementation cycle after rejection)
         try:
-            host.start_review(mission, wp_id, review_ref=feedback_ref)
+            _transition_review_rejected(host, mission, wp_id, feedback_ref)
         except TransitionRejectedError as exc:
-            logger.error("WP %s: start-review (re-impl trigger) rejected: %s", wp_id, exc)
+            logger.error("WP %s: review rejection transition rejected: %s", wp_id, exc)
             break
 
         # Run re-implementation with review feedback
@@ -241,6 +254,7 @@ async def execute_and_advance(
             role="implementation",
             timeout_seconds=agent_cfg.timeout_seconds,
             log_file=reimpl_log,
+            repo_root=_agent_repo_root(host, cfg),
         )
         if not is_success(reimpl_result):
             error_msg = truncate_error(
@@ -248,15 +262,24 @@ async def execute_and_advance(
             )
             host.append_history(mission, wp_id, f"Re-implementation failed: {error_msg}")
             try:
-                host.transition(mission, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
+                _host_transition(
+                    host,
+                    mission,
+                    wp_id,
+                    "blocked",
+                    note=f"Re-implementation failed: {error_msg}",
+                    force=True,
+                )
             except Exception:
                 pass
             break
 
         # in_progress -> for_review (back to review queue for next cycle)
         try:
-            host.transition(
-                mission, wp_id, "for_review",
+            _transition_for_review(
+                host,
+                mission,
+                wp_id,
                 note=f"Re-implementation complete (cycle {review_cycle})"
             )
         except TransitionRejectedError as exc:
@@ -274,6 +297,217 @@ def _build_rework_prompt(original_prompt: str, feedback: str | None) -> str:
         f"{original_prompt}\n\n"
         f"## Review Feedback (address before resubmitting)\n\n"
         f"{feedback}\n"
+    )
+
+
+def _agent_repo_root(host: HostClient, cfg: OrchestratorConfig) -> Path:
+    repo_root = getattr(host, "repo_root", None)
+    return repo_root if isinstance(repo_root, Path) else cfg.repo_root
+
+
+def _host_transition(
+    host: HostClient,
+    mission: str,
+    wp_id: str,
+    to: str,
+    *,
+    note: str | None = None,
+    review_ref: str | None = None,
+    force: bool = False,
+    subtasks_complete: bool | None = None,
+    implementation_evidence_present: bool | None = None,
+) -> None:
+    """Call transition with newer guard flags without requiring host/client edits."""
+    extra_kwargs: dict[str, Any] = {}
+    if force:
+        extra_kwargs["force"] = True
+    if subtasks_complete is not None:
+        extra_kwargs["subtasks_complete"] = subtasks_complete
+    if implementation_evidence_present is not None:
+        extra_kwargs["implementation_evidence_present"] = implementation_evidence_present
+
+    try:
+        host.transition(
+            mission,
+            wp_id,
+            to,
+            note=note,
+            review_ref=review_ref,
+            **extra_kwargs,
+        )
+        return
+    except TypeError:
+        if not extra_kwargs:
+            raise
+
+    _call_transition_direct(
+        host,
+        mission,
+        wp_id,
+        to,
+        note=note,
+        review_ref=review_ref,
+        force=force,
+        subtasks_complete=subtasks_complete,
+        implementation_evidence_present=implementation_evidence_present,
+    )
+
+
+def _call_transition_direct(
+    host: HostClient,
+    mission: str,
+    wp_id: str,
+    to: str,
+    *,
+    note: str | None,
+    review_ref: str | None,
+    force: bool,
+    subtasks_complete: bool | None,
+    implementation_evidence_present: bool | None,
+) -> None:
+    call = getattr(host, "_call", None)
+    if call is None:
+        raise TypeError("Host transition does not support required compatibility flags")
+
+    args = [
+        "transition",
+        "--mission",
+        mission,
+        "--wp",
+        wp_id,
+        "--to",
+        to,
+        "--actor",
+        host.actor,
+    ]
+    if note:
+        args += ["--note", note]
+    policy_json = getattr(host, "policy_json", None)
+    if policy_json:
+        args += ["--policy", policy_json]
+    if review_ref:
+        args += ["--review-ref", review_ref]
+    if force:
+        args.append("--force")
+    if subtasks_complete is not None:
+        args.append(
+            "--subtasks-complete" if subtasks_complete else "--no-subtasks-complete"
+        )
+    if implementation_evidence_present is not None:
+        args.append(
+            "--implementation-evidence-present"
+            if implementation_evidence_present
+            else "--no-implementation-evidence-present"
+        )
+    call(args)
+
+
+def _transition_for_review(
+    host: HostClient,
+    mission: str,
+    wp_id: str,
+    note: str,
+) -> None:
+    """Move in_progress to for_review across strict and legacy hosts."""
+    try:
+        _host_transition(
+            host,
+            mission,
+            wp_id,
+            "for_review",
+            note=note,
+            subtasks_complete=True,
+            implementation_evidence_present=True,
+        )
+    except TransitionRejectedError:
+        _host_transition(
+            host,
+            mission,
+            wp_id,
+            "for_review",
+            note=note,
+            force=True,
+            subtasks_complete=True,
+            implementation_evidence_present=True,
+        )
+
+
+def _transition_review_approved(
+    host: HostClient,
+    mission: str,
+    wp_id: str,
+    review_agent_id: str,
+    review_cycle: int,
+    review_ref: str,
+) -> None:
+    """Mark a reviewed WP done across legacy and in_review host contracts."""
+    note = f"Review approved by '{review_agent_id}'"
+    try:
+        _host_transition(
+            host,
+            mission,
+            wp_id,
+            "done",
+            note=note,
+            review_ref=review_ref,
+        )
+        return
+    except TransitionRejectedError as first_error:
+        logger.info(
+            "WP %s: legacy done transition rejected, claiming review lane: %s",
+            wp_id,
+            first_error,
+        )
+
+    start_result = host.start_review(mission, wp_id, review_ref=review_ref)
+    if start_result.to_lane == "in_review":
+        _host_transition(
+            host,
+            mission,
+            wp_id,
+            "done",
+            note=note,
+            review_ref=review_ref,
+            force=True,
+        )
+        return
+
+    if start_result.to_lane == "in_progress":
+        raise TransitionRejectedError(
+            "TRANSITION_REJECTED",
+            f"start-review returned legacy rework lane during approval cycle {review_cycle}",
+        )
+
+    raise TransitionRejectedError(
+        "TRANSITION_REJECTED",
+        f"start-review returned unsupported lane '{start_result.to_lane}'",
+    )
+
+
+def _transition_review_rejected(
+    host: HostClient,
+    mission: str,
+    wp_id: str,
+    feedback_ref: str,
+) -> None:
+    """Move a rejected WP back to in_progress across review lane contracts."""
+    start_result = host.start_review(mission, wp_id, review_ref=feedback_ref)
+    if start_result.to_lane == "in_progress":
+        return
+    if start_result.to_lane == "in_review":
+        _host_transition(
+            host,
+            mission,
+            wp_id,
+            "in_progress",
+            note="Review rejected; rework required",
+            review_ref=feedback_ref,
+            force=True,
+        )
+        return
+    raise TransitionRejectedError(
+        "TRANSITION_REJECTED",
+        f"start-review returned unsupported lane '{start_result.to_lane}'",
     )
 
 

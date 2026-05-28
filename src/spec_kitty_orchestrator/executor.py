@@ -1,14 +1,15 @@
 """Subprocess spawning and log capture for agent executions.
 
 Spawns agent processes asynchronously, captures stdout/stderr to log files,
-and enforces timeouts. Uses workspace_path returned by the host API —
-does NOT create worktrees or run git directly.
+and enforces timeouts. Uses workspace_path returned by the host API and creates
+a provider-local git worktree when older hosts return a path without creating it.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -32,6 +33,63 @@ class ExecutionTimeoutError(ExecutorError):
     """Raised when an agent execution exceeds the timeout."""
 
 
+def ensure_working_dir(working_dir: Path, repo_root: Path | None = None) -> None:
+    """Ensure the subprocess cwd exists and is usable.
+
+    Some host contract versions return a .worktrees path from start-implementation
+    without creating it. Prefer a detached git worktree so agents can commit; fall
+    back to a plain directory only when no git repo root is available.
+    """
+    if working_dir.exists():
+        if not working_dir.is_dir():
+            raise ProcessSpawnError(
+                f"Working directory is not a directory: {working_dir}"
+            )
+        return
+
+    if repo_root is not None and _is_git_repo(repo_root):
+        working_dir.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "add",
+                "--detach",
+                str(working_dir),
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            logger.info("Created missing agent worktree at %s", working_dir)
+            return
+        raise ProcessSpawnError(
+            "Failed to create working directory as git worktree "
+            f"{working_dir}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    try:
+        working_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ProcessSpawnError(
+            f"Failed to create working directory {working_dir}: {exc}"
+        ) from exc
+
+
+def _is_git_repo(path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def get_log_path(log_dir: Path, mission: str, wp_id: str, role: str) -> Path:
     """Return the log file path for a given WP execution.
 
@@ -53,6 +111,7 @@ async def spawn_agent(
     prompt: str,
     working_dir: Path,
     role: str,
+    repo_root: Path | None = None,
 ) -> tuple[asyncio.subprocess.Process, list[str]]:
     """Spawn an agent subprocess.
 
@@ -68,6 +127,7 @@ async def spawn_agent(
     Raises:
         ProcessSpawnError: If the process cannot be spawned.
     """
+    ensure_working_dir(working_dir, repo_root)
     cmd = invoker.build_command(prompt, working_dir, role)
     logger.info("Spawning %s: %s ...", invoker.agent_id, " ".join(cmd[:3]))
 
@@ -129,6 +189,7 @@ async def execute_agent(
     role: str,
     timeout_seconds: int,
     log_file: Path | None = None,
+    repo_root: Path | None = None,
 ) -> InvocationResult:
     """Execute an agent and return a structured InvocationResult.
 
@@ -141,6 +202,7 @@ async def execute_agent(
         role: "implementation" or "review".
         timeout_seconds: Maximum execution time.
         log_file: Optional path to write combined stdout+stderr.
+        repo_root: Optional repository root used to create a missing worktree cwd.
 
     Returns:
         InvocationResult with all captured output.
@@ -148,7 +210,9 @@ async def execute_agent(
     start = time.monotonic()
     stdin_data = prompt.encode("utf-8") if invoker.uses_stdin else None
 
-    process, cmd = await spawn_agent(invoker, prompt, working_dir, role)
+    process, cmd = await spawn_agent(
+        invoker, prompt, working_dir, role, repo_root=repo_root
+    )
     stdout_bytes, stderr_bytes, exit_code = await execute_with_timeout(
         process, stdin_data, timeout_seconds
     )
@@ -179,6 +243,7 @@ __all__ = [
     "ExecutorError",
     "ProcessSpawnError",
     "ExecutionTimeoutError",
+    "ensure_working_dir",
     "get_log_path",
     "execute_agent",
     "TIMEOUT_EXIT_CODE",

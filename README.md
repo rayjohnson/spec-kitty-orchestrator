@@ -222,6 +222,45 @@ The `tests/conformance/fixtures/` directory contains 13 canonical JSON fixtures 
 python3.11 -m pytest tests/conformance/ -v
 ```
 
+## End-to-end tests
+
+The e2e suite lives in `tests/e2e/` and launches real subprocesses for both
+`spec-kitty-orchestrator` and `spec-kitty`. It has two modes:
+
+```bash
+# Deterministic local suite: fake claude/codex/opencode binaries, real spec-kitty host.
+pytest tests/e2e -m "e2e and not real_agents" -q
+
+# Real-agent trusted-runner suite: requires authenticated claude/codex/opencode CLIs.
+SK_ORCH_E2E_REAL_AGENTS=1 pytest tests/e2e -m "real_agents" -q
+```
+
+By default the harness looks for a sibling `../spec-kitty/.venv/bin/spec-kitty`
+checkout. Override with:
+
+```bash
+SK_ORCH_E2E_SPEC_KITTY_BIN=/absolute/path/to/spec-kitty pytest tests/e2e -q
+SK_ORCH_E2E_SPEC_KITTY_REPO=/absolute/path/to/spec-kitty pytest tests/e2e -q
+```
+
+Real-agent matrix defaults to:
+
+- `claude-code -> codex`
+- `claude-code -> opencode`
+- `codex -> claude-code`
+- `opencode -> claude-code`
+
+Override with:
+
+```bash
+SK_ORCH_E2E_AGENT_MATRIX=claude-code:codex,codex:claude-code \
+SK_ORCH_E2E_REAL_AGENTS=1 \
+pytest tests/e2e -m real_agents -q
+```
+
+The deterministic suite is intended for CI. Real-agent tests are deselected by
+default and should run only on trusted machines with local agent credentials.
+
 ---
 
 ## Development

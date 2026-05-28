@@ -25,6 +25,7 @@ from ..host.client import HostClient, ContractMismatchError
 from ..loop import OrchestrationError, run_orchestration_loop
 from ..policy import PolicyMetadata
 from ..state import load_state, new_run_state, save_state
+from ..workspaces import WorkspaceError, prepare_mission_worktree
 
 app = typer.Typer(
     name="spec-kitty-orchestrator",
@@ -88,10 +89,17 @@ def orchestrate(
         console.print(f"[red]Policy validation failed:[/red] {exc}")
         raise typer.Exit(1)
 
+    try:
+        host_root = prepare_mission_worktree(root, mission)
+    except WorkspaceError as exc:
+        console.print(f"[red]Cannot prepare mission worktree:[/red] {exc}")
+        raise typer.Exit(1)
+
     host = HostClient(
         repo_root=root,
         actor=actor,
         policy_json=policy.to_json(),
+        history_repo_root=host_root,
     )
 
     # Validate contract version
@@ -180,7 +188,13 @@ def resume(
 
     policy = run_state.policy
     cfg = load_config(root, actor)
-    host = HostClient(root, actor, policy_json=policy.to_json())
+    try:
+        host_root = prepare_mission_worktree(root, run_state.mission_slug)
+    except WorkspaceError as exc:
+        console.print(f"[red]Cannot prepare mission worktree:[/red] {exc}")
+        raise typer.Exit(1)
+
+    host = HostClient(root, actor, policy_json=policy.to_json(), history_repo_root=host_root)
 
     try:
         asyncio.run(run_orchestration_loop(run_state.mission_slug, host, run_state, cfg))

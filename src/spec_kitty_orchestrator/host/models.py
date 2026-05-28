@@ -85,6 +85,7 @@ class StartReviewData(BaseModel):
     to_lane: str
     prompt_path: str
     policy_metadata_recorded: bool
+    no_op: bool = False
 
 
 class TransitionData(BaseModel):
