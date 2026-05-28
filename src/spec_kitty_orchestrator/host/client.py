@@ -2,7 +2,7 @@
 
 Every state mutation in spec-kitty is executed by calling:
 
-    spec-kitty orchestrator-api <subcommand> [args] --json
+    spec-kitty orchestrator-api <subcommand> [args]
 
 The JSON response is parsed against the canonical envelope and validated.
 Errors are mapped to typed HostError subclasses.
@@ -117,7 +117,7 @@ class HostClient:
     def _call(self, args: list[str]) -> HostResponse:
         """Invoke spec-kitty orchestrator-api with the given args.
 
-        Runs: spec-kitty orchestrator-api <args> --json
+        Runs: spec-kitty orchestrator-api <args>
         Parses the canonical JSON envelope.
         Raises HostError (or subclass) on success=false.
 
@@ -132,7 +132,7 @@ class HostClient:
             HostError: For any other error_code.
             RuntimeError: If subprocess fails entirely or output is not JSON.
         """
-        cmd = [self._bin, "orchestrator-api"] + args + ["--json"]
+        cmd = [self._bin, "orchestrator-api"] + args
         try:
             result = subprocess.run(
                 cmd,

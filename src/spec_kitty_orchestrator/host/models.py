@@ -1,7 +1,7 @@
 """Pydantic response models for the spec-kitty orchestrator-api contract.
 
 These models validate the canonical JSON envelope emitted by every
-`spec-kitty orchestrator-api <cmd> --json` invocation.
+`spec-kitty orchestrator-api <cmd>` invocation.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class ReadyWorkPackage(BaseModel):
     wp_id: str
     lane: str
     dependencies_satisfied: bool
-    recommended_base: str | None
+    recommended_base: str | None = None
 
 
 class ListReadyData(BaseModel):

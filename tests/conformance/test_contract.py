@@ -207,6 +207,42 @@ class TestListReady:
         assert wp.dependencies_satisfied is True
         assert wp.recommended_base is None
 
+    def test_accepts_omitted_recommended_base(self) -> None:
+        client = _make_client()
+        fixture = _load_fixture("list_ready_success")
+        fixture["data"]["ready_work_packages"][0].pop("recommended_base")
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**fixture)):
+            result = client.list_ready("099-test-feature")
+
+        assert result.ready_work_packages[0].recommended_base is None
+
+
+# -- Host invocation ----------------------------------------------------------
+
+
+class TestHostInvocation:
+    def test_call_does_not_append_json_flag(self) -> None:
+        client = _make_client(repo_root=Path("/tmp/test-repo"))
+        fixture = _load_fixture("contract_version_success")
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(fixture)
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch(
+            "spec_kitty_orchestrator.host.client.subprocess.run",
+            return_value=mock_result,
+        ) as run:
+            client._call(["contract-version"])
+
+        run.assert_called_once()
+        cmd = run.call_args.args[0]
+        assert cmd == ["spec-kitty", "orchestrator-api", "contract-version"]
+        assert "--json" not in cmd
+
 
 # -- start-implementation -----------------------------------------------------
 
