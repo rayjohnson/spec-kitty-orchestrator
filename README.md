@@ -1,6 +1,6 @@
 # spec-kitty-orchestrator
 
-External orchestrator for the [spec-kitty](https://github.com/spec-kitty/spec-kitty) workflow system.
+External orchestrator for the [spec-kitty](https://github.com/Priivacy-ai/spec-kitty) workflow system.
 
 Coordinates multiple AI agents to autonomously implement and review work packages (WPs) in parallel. Integrates with spec-kitty **exclusively** via the versioned `orchestrator-api` CLI contract — no direct file access, no internal imports.
 
@@ -11,7 +11,7 @@ Coordinates multiple AI agents to autonomously implement and review work package
 ```
 spec-kitty-orchestrator
         │
-        │  spec-kitty orchestrator-api <cmd> --json
+        │  spec-kitty orchestrator-api <cmd>
         ▼
    spec-kitty (host)
         │
@@ -25,24 +25,27 @@ The orchestrator polls the host for ready work packages, spawns AI agents in wor
 ## Requirements
 
 - Python 3.10+
-- [spec-kitty](https://github.com/spec-kitty/spec-kitty) ≥ 2.x installed and on PATH (provides the `orchestrator-api` contract)
+- [spec-kitty](https://github.com/Priivacy-ai/spec-kitty) ≥ 2.x installed and on PATH (provides the `orchestrator-api` contract)
 - At least one supported AI agent CLI installed (see [Supported agents](#supported-agents))
 
 ---
 
 ## Installation
 
-```bash
-pip install spec-kitty-orchestrator
-```
-
-Or from source:
+Use `pipx` for an isolated command-line install:
 
 ```bash
-git clone https://github.com/spec-kitty/spec-kitty-orchestrator
-cd spec-kitty-orchestrator
-pip install -e ".[dev]"
+pipx install spec-kitty-orchestrator
 ```
+
+If you prefer `uv` tool management:
+
+```bash
+uv tool install spec-kitty-orchestrator
+```
+
+Source lives at [`Priivacy-ai/spec-kitty-orchestrator`](https://github.com/Priivacy-ai/spec-kitty-orchestrator).
+Install from GitHub only when intentionally testing unreleased provider changes.
 
 ---
 
@@ -50,7 +53,7 @@ pip install -e ".[dev]"
 
 ```bash
 # Verify contract compatibility with the installed spec-kitty
-spec-kitty orchestrator-api contract-version --json
+spec-kitty orchestrator-api contract-version
 
 # Dry-run to validate configuration
 spec-kitty-orchestrator orchestrate --mission 034-my-feature --dry-run
@@ -167,7 +170,7 @@ Every host mutation call includes a `PolicyMetadata` block that declares the orc
 ```python
 PolicyMetadata(
     orchestrator_id="spec-kitty-orchestrator",
-    orchestrator_version="0.1.1",
+    orchestrator_version="0.1.2",
     agent_family="claude",
     approval_mode="full_auto",   # full_auto | interactive | supervised
     sandbox_mode="workspace_write",  # workspace_write | read_only | none
@@ -186,7 +189,8 @@ The orchestrator has **no direct access** to spec-kitty internals:
 
 - No imports from `specify_cli` or `spec_kitty_events`
 - No direct reads or writes to `kitty-specs/`
-- No git operations — worktree creation is delegated to the host via `start-implementation`
+- No imports from spec-kitty internals and no direct mission-state edits
+- Git operations are limited to provider-owned workspace preparation when the host returns a worktree path that does not yet exist
 - All state mutations go through `HostClient` subprocess calls
 
 This is enforced at test time:
