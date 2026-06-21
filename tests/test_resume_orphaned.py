@@ -90,7 +90,10 @@ class _FakeHost:
 
     def start_implementation(self, mission, wp):
         self.start_impl_calls.append(wp)
-        return SimpleNamespace(workspace_path="/tmp/ws", prompt_path="/tmp/p.md")
+        return SimpleNamespace(
+            workspace_path="/tmp/ws", prompt_path="/tmp/p.md",
+            lane_branch=None, lane_base_ref=None,
+        )
 
 
 def _cfg(tmp_path: Path):
@@ -119,7 +122,7 @@ def test_loop_adopts_orphaned_in_progress_instead_of_deadlock(tmp_path, monkeypa
 
     host = _FakeHost()
 
-    async def fake_execute_and_advance(wp_id, mission, ws, pp, agent, h, rs, ac, cfg, conc):
+    async def fake_execute_and_advance(wp_id, mission, ws, pp, agent, h, rs, ac, cfg, conc, **kwargs):
         # Simulate the implementer running and the WP reaching a terminal lane.
         h.lanes[wp_id] = "done"
 

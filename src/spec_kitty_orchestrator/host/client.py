@@ -32,7 +32,7 @@ from .models import (
 )
 
 # The minimum contract version this provider supports
-_MIN_CONTRACT_VERSION = "1.0.0"
+_MIN_CONTRACT_VERSION = "1.1.0"
 _SPEC_KITTY_BIN = "spec-kitty"
 
 

@@ -15,7 +15,7 @@ from typing import Any
 
 from .agents import get_invoker
 from .config import AgentSelectionConfig, OrchestratorConfig
-from .executor import execute_agent, get_log_path
+from .executor import CommitError, commit_lane_work, current_lane_head, execute_agent, get_log_path
 from .host.client import HostClient, TransitionRejectedError, WPAlreadyClaimedError
 from .monitor import (
     classify_failure,
@@ -70,6 +70,42 @@ def _describe_stuck_wps(state_data, run_state, terminal_lanes) -> str:
     return ", ".join(parts) if parts else "(none)"
 
 
+def _commit_implementation(
+    workspace_path: Path,
+    wp_id: str,
+    agent_id: str,
+    lane_branch: str | None,
+    output_base: str | None,
+) -> tuple[bool, str | None]:
+    """Commit the implementer's lane edits after a successful run.
+
+    ``output_base`` is the lane HEAD captured *before* this WP ran, so output is
+    measured as commits this WP actually added — dependency-lane merges applied
+    at allocation are not mistaken for WP output.
+
+    Returns ``(ok, error)``:
+    - ``(True, None)``  real output was committed, OR this is a legacy/non-lane
+      WP (``lane_branch`` is None) for which the orchestrator does not commit.
+    - ``(False, msg)``  the WP produced no committable output, or committing
+      failed (e.g. the worktree is not on the lane branch). The caller must NOT
+      advance the WP — empty WPs reaching ``done`` is the bug this guards.
+    """
+    if not lane_branch:
+        return True, None
+    try:
+        has_output = commit_lane_work(
+            workspace_path,
+            f"feat({wp_id}): implementation by {agent_id}",
+            lane_branch=lane_branch,
+            output_base=output_base,
+        )
+    except CommitError as exc:
+        return False, str(exc)
+    if not has_output:
+        return False, "implementation produced no committable changes"
+    return True, None
+
+
 async def execute_and_advance(
     wp_id: str,
     mission: str,
@@ -81,6 +117,8 @@ async def execute_and_advance(
     agent_cfg: AgentSelectionConfig,
     cfg: OrchestratorConfig,
     concurrency: ConcurrencyManager,
+    *,
+    lane_branch: str | None = None,
 ) -> None:
     """Execute one WP through the full impl -> (review ->)* done lifecycle.
 
@@ -90,7 +128,7 @@ async def execute_and_advance(
     Args:
         wp_id: Work package ID.
         mission: Mission slug.
-        workspace_path: Worktree path returned by host.start_implementation.
+        workspace_path: Lane worktree path returned by host.start_implementation.
         prompt_path: WP markdown prompt file path.
         impl_agent_id: Selected implementation agent ID.
         host: HostClient for all state mutations.
@@ -98,10 +136,18 @@ async def execute_and_advance(
         agent_cfg: Agent selection config.
         cfg: Full orchestrator config.
         concurrency: Concurrency manager (already acquired before this call).
+        lane_branch: Lane branch the worktree is on (contract >= 1.1.0). When set,
+            the orchestrator commits the implementer's edits onto it after each
+            successful run. None for legacy/non-lane WPs (no commit performed).
     """
     wp_exec = run_state.get_or_create_wp(wp_id)
     wp_exec.implementation_agent = impl_agent_id
     save_state(run_state, cfg.state_file)
+
+    # Lane tip before any of this WP's work runs. Output is measured against this
+    # (NOT the mission base) so dependency-lane merges already applied when the
+    # worktree was allocated are not miscounted as this WP's implementation.
+    impl_base = current_lane_head(workspace_path) if lane_branch else None
 
     try:
         prompt_text = prompt_path.read_text(encoding="utf-8")
@@ -134,10 +180,21 @@ async def execute_and_advance(
         )
 
         if is_success(result):
+            committed, commit_err = _commit_implementation(
+                workspace_path, wp_id, impl_agent_id, lane_branch, impl_base
+            )
+            if not committed:
+                # Agent exited 0 but produced no committable output (or the
+                # commit was unsafe). Do NOT advance — surface it instead.
+                logger.warning("WP %s: not advancing to review — %s", wp_id, commit_err)
+                host.append_history(mission, wp_id, f"FAILED: {commit_err}")
+                _mark_failed(wp_exec, commit_err or "commit failed")
+                save_state(run_state, cfg.state_file)
+                return
             impl_success = True
             host.append_history(
                 mission, wp_id,
-                f"Implementation completed successfully by '{impl_agent_id}'"
+                f"Implementation committed and completed by '{impl_agent_id}'"
             )
             break
 
@@ -296,6 +353,22 @@ async def execute_and_advance(
                     wp_id,
                     "blocked",
                     note=f"Re-implementation failed: {error_msg}",
+                    force=True,
+                )
+            except Exception:
+                pass
+            break
+
+        # Commit the rework output before re-review (same gate as first impl).
+        committed, commit_err = _commit_implementation(
+            workspace_path, wp_id, impl_agent_id, lane_branch, impl_base
+        )
+        if not committed:
+            host.append_history(mission, wp_id, f"Re-implementation not accepted: {commit_err}")
+            try:
+                _host_transition(
+                    host, mission, wp_id, "blocked",
+                    note=f"Re-implementation not accepted: {commit_err}",
                     force=True,
                 )
             except Exception:
@@ -644,6 +717,7 @@ async def run_orchestration_loop(
                 _run_wp_task(
                     wp_id, mission, workspace_path, prompt_path,
                     impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
+                    lane_branch=impl_resp.lane_branch,
                 )
             )
             active_tasks.add(task)
@@ -678,12 +752,15 @@ async def _run_wp_task(
     agent_cfg: AgentSelectionConfig,
     cfg: OrchestratorConfig,
     concurrency: ConcurrencyManager,
+    *,
+    lane_branch: str | None = None,
 ) -> None:
     """Wrapper that releases concurrency slot after execute_and_advance."""
     try:
         await execute_and_advance(
             wp_id, mission, workspace_path, prompt_path,
             impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
+            lane_branch=lane_branch,
         )
     finally:
         concurrency.mark_idle(wp_id)

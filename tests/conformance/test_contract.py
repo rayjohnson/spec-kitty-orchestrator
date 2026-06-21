@@ -144,7 +144,7 @@ class TestContractVersion:
         with _patch_call(client, "contract_version_success"):
             result = client.contract_version()
         assert isinstance(result, ContractVersionData)
-        assert result.api_version == "1.0.0"
+        assert result.api_version == "1.1.0"
         assert result.min_supported_provider_version == "0.1.0"
 
     def test_mismatch_raises_contract_mismatch_error(self) -> None:
@@ -287,7 +287,8 @@ class TestStartImplementation:
         assert result.to_lane == "in_progress"
         assert result.policy_metadata_recorded is True
         assert result.no_op is False
-        assert "WP01" in result.workspace_path
+        # Contract >= 1.1.0: workspace_path is the lane worktree (not per-WP).
+        assert result.workspace_path.endswith("lane-a")
         assert result.prompt_path.endswith("WP01.md")
 
     def test_policy_required_raises(self) -> None:
@@ -312,6 +313,39 @@ class TestStartImplementation:
         with patch.object(client, "_call", return_value=HostResponse(**fixture)):
             result = client.start_implementation("099-test-feature", "WP01")
         assert result.no_op is True
+
+    def test_parses_lane_fields_when_present(self) -> None:
+        """Contract >= 1.1.0: lane WPs carry lane_id/lane_branch/lane_base_ref."""
+        client = _make_client()
+        fixture = _load_fixture("start_implementation_success")
+        fixture["data"].update({
+            "lane_id": "lane-a",
+            "lane_branch": "kitty/mission-feat-01ABCDEF-lane-a",
+            "lane_base_ref": "kitty/mission-feat-01ABCDEF",
+        })
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**fixture)):
+            result = client.start_implementation("099-test-feature", "WP01")
+        assert result.lane_id == "lane-a"
+        assert result.lane_branch == "kitty/mission-feat-01ABCDEF-lane-a"
+        assert result.lane_base_ref == "kitty/mission-feat-01ABCDEF"
+
+    def test_lane_fields_default_none_when_absent(self) -> None:
+        """Planning/non-lane WPs omit lane_* — must parse as None."""
+        client = _make_client()
+        fixture = _load_fixture("start_implementation_success")
+        for key in ("lane_id", "lane_branch", "lane_base_ref"):
+            fixture["data"].pop(key, None)
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**fixture)):
+            result = client.start_implementation("099-test-feature", "WP01")
+        assert result.lane_id is None
+        assert result.lane_branch is None
+        assert result.lane_base_ref is None
 
 
 # -- start-review -------------------------------------------------------------
@@ -511,7 +545,7 @@ class TestContractVersionEnforcement:
         client = _make_client()
         with _patch_call(client, "contract_version_success"):
             result = client.contract_version()
-        assert result.api_version == "1.0.0"
+        assert result.api_version == "1.1.0"
 
     def test_newer_host_version_succeeds(self) -> None:
         """If host reports a newer version (same major), no error is raised."""

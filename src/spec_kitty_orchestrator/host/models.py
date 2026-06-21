@@ -74,6 +74,11 @@ class StartImplData(BaseModel):
     prompt_path: str
     policy_metadata_recorded: bool
     no_op: bool
+    # Lane fields (contract >= 1.1.0). Present for lane WPs; omitted for
+    # planning/non-lane WPs, so they are optional.
+    lane_id: str | None = None
+    lane_branch: str | None = None
+    lane_base_ref: str | None = None
 
 
 class StartReviewData(BaseModel):
