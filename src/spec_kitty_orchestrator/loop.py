@@ -704,6 +704,13 @@ async def run_orchestration_loop(
                 wp_exec = run_state.get_or_create_wp(wp_id)
                 wp_exec.last_error = truncate_error(str(exc))
                 save_state(run_state, cfg.state_file)
+                # Quarantine so the WP is NOT re-adopted on the next poll. An
+                # un-allocatable lane (e.g. LANE_ALLOCATION_FAILED from a stale
+                # dirty worktree) would otherwise tight-loop every poll — spawning
+                # zero agents and starving other schedulable WPs. Marking it driven
+                # surfaces it in the stall report (with last_error) instead of
+                # spinning, while sibling WPs keep getting scheduled this iteration.
+                driven_ids.add(wp_id)
                 continue
 
             workspace_path = Path(impl_resp.workspace_path)

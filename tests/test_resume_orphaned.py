@@ -169,3 +169,37 @@ def test_loop_reports_stuck_wps_when_genuinely_blocked(tmp_path, monkeypatch) ->
     assert "WP01" in str(exc.value)
     assert "for_review" in str(exc.value)
     assert host.start_impl_calls == [], "for_review WP must not be (re)started"
+
+
+def test_start_implementation_failure_quarantines_wp_no_infinite_loop(
+    tmp_path, monkeypatch
+) -> None:
+    """A WP whose start-implementation fails (e.g. LANE_ALLOCATION_FAILED on a
+    stale dirty lane) must be quarantined after ONE attempt — not re-adopted every
+    poll into a tight loop. It surfaces as a stall with its last_error instead."""
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(loop_mod, "DEADLOCK_THRESHOLD", 2)
+
+    class FailingHost(_FakeHost):
+        def start_implementation(self, mission, wp):
+            self.start_impl_calls.append(wp)
+            raise RuntimeError("[LANE_ALLOCATION_FAILED] lane worktree has uncommitted changes")
+
+    host = FailingHost()  # WP01 orphaned in_progress (from _FakeHost)
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    async def run():
+        await asyncio.wait_for(
+            run_orchestration_loop("m", host, run_state, cfg), timeout=5.0
+        )
+
+    with pytest.raises(DeadlockError) as exc:
+        asyncio.run(run())
+
+    # Exactly ONE start-implementation attempt — quarantined, never re-adopted.
+    assert host.start_impl_calls == ["WP01"], (
+        f"expected a single attempt (no infinite loop), got {host.start_impl_calls}"
+    )
+    # The stall report surfaces the offending WP (with its last_error).
+    assert "WP01" in str(exc.value)
