@@ -8,6 +8,7 @@ persisted via save_state after each significant event.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -311,6 +312,7 @@ async def execute_and_advance(
                 logger.info("WP %s completed successfully", wp_id)
             except TransitionRejectedError as exc:
                 logger.error("WP %s: done transition rejected: %s", wp_id, exc)
+                _mark_failed(wp_exec, str(exc))
             break
 
         # Rejected -- extract feedback, enforce retry limit
@@ -318,6 +320,7 @@ async def execute_and_advance(
         wp_exec.review_feedback = feedback
         wp_exec.review_retries += 1
         save_state(run_state, cfg.state_file)
+        feedback_ref = f"feedback-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
 
         if wp_exec.review_retries > agent_cfg.max_retries:
             logger.error("WP %s: review retry limit exceeded", wp_id)
@@ -329,22 +332,33 @@ async def execute_and_advance(
                     wp_id,
                     "blocked",
                     note="Review cycle limit exceeded",
-                    force=True,
+                    review_result_json=_review_result_json(
+                        review_agent_id,
+                        "changes_requested",
+                        feedback_ref,
+                    ),
                 )
-            except Exception:
-                pass
+            except TransitionRejectedError as exc:
+                logger.error("WP %s: blocked transition rejected: %s", wp_id, exc)
+                _mark_failed(wp_exec, str(exc))
             break
 
-        feedback_ref = f"feedback-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
         host.append_history(
             mission, wp_id,
             f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
         )
 
         try:
-            _transition_review_rejected(host, mission, wp_id, feedback_ref)
+            _transition_review_rejected(
+                host,
+                mission,
+                wp_id,
+                review_agent_id,
+                feedback_ref,
+            )
         except TransitionRejectedError as exc:
             logger.error("WP %s: review rejection transition rejected: %s", wp_id, exc)
+            _mark_failed(wp_exec, str(exc))
             break
 
         # Run re-implementation with review feedback
@@ -371,10 +385,10 @@ async def execute_and_advance(
                     wp_id,
                     "blocked",
                     note=f"Re-implementation failed: {error_msg}",
-                    force=True,
                 )
-            except Exception:
-                pass
+            except TransitionRejectedError as exc:
+                logger.error("WP %s: blocked transition rejected: %s", wp_id, exc)
+                _mark_failed(wp_exec, str(exc))
             break
 
         # Commit the rework output before re-review (same gate as first impl).
@@ -387,10 +401,10 @@ async def execute_and_advance(
                 _host_transition(
                     host, mission, wp_id, "blocked",
                     note=f"Re-implementation not accepted: {commit_err}",
-                    force=True,
                 )
-            except Exception:
-                pass
+            except TransitionRejectedError as exc:
+                logger.error("WP %s: blocked transition rejected: %s", wp_id, exc)
+                _mark_failed(wp_exec, str(exc))
             break
         output_base = current_lane_head(workspace_path) if lane_branch else output_base
 
@@ -404,6 +418,7 @@ async def execute_and_advance(
             )
         except TransitionRejectedError as exc:
             logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
+            _mark_failed(wp_exec, str(exc))
             break
 
     save_state(run_state, cfg.state_file)
@@ -434,6 +449,8 @@ def _host_transition(
     note: str | None = None,
     review_ref: str | None = None,
     force: bool = False,
+    evidence_json: str | None = None,
+    review_result_json: str | None = None,
     subtasks_complete: bool | None = None,
     implementation_evidence_present: bool | None = None,
 ) -> None:
@@ -441,6 +458,10 @@ def _host_transition(
     extra_kwargs: dict[str, Any] = {}
     if force:
         extra_kwargs["force"] = True
+    if evidence_json is not None:
+        extra_kwargs["evidence_json"] = evidence_json
+    if review_result_json is not None:
+        extra_kwargs["review_result_json"] = review_result_json
     if subtasks_complete is not None:
         extra_kwargs["subtasks_complete"] = subtasks_complete
     if implementation_evidence_present is not None:
@@ -468,6 +489,8 @@ def _host_transition(
         note=note,
         review_ref=review_ref,
         force=force,
+        evidence_json=evidence_json,
+        review_result_json=review_result_json,
         subtasks_complete=subtasks_complete,
         implementation_evidence_present=implementation_evidence_present,
     )
@@ -482,6 +505,8 @@ def _call_transition_direct(
     note: str | None,
     review_ref: str | None,
     force: bool,
+    evidence_json: str | None,
+    review_result_json: str | None,
     subtasks_complete: bool | None,
     implementation_evidence_present: bool | None,
 ) -> None:
@@ -509,6 +534,10 @@ def _call_transition_direct(
         args += ["--review-ref", review_ref]
     if force:
         args.append("--force")
+    if evidence_json is not None:
+        args += ["--evidence-json", evidence_json]
+    if review_result_json is not None:
+        args += ["--review-result-json", review_result_json]
     if subtasks_complete is not None:
         args.append(
             "--subtasks-complete" if subtasks_complete else "--no-subtasks-complete"
@@ -528,28 +557,16 @@ def _transition_for_review(
     wp_id: str,
     note: str,
 ) -> None:
-    """Move in_progress to for_review across strict and legacy hosts."""
-    try:
-        _host_transition(
-            host,
-            mission,
-            wp_id,
-            "for_review",
-            note=note,
-            subtasks_complete=True,
-            implementation_evidence_present=True,
-        )
-    except TransitionRejectedError:
-        _host_transition(
-            host,
-            mission,
-            wp_id,
-            "for_review",
-            note=note,
-            force=True,
-            subtasks_complete=True,
-            implementation_evidence_present=True,
-        )
+    """Ask the host to validate and perform in_progress -> for_review."""
+    _host_transition(host, mission, wp_id, "for_review", note=note)
+
+
+def _review_result_json(reviewer: str, verdict: str, reference: str) -> str:
+    return json.dumps(
+        {"reviewer": reviewer, "verdict": verdict, "reference": reference},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _transition_review_approved(
@@ -560,8 +577,13 @@ def _transition_review_approved(
     review_cycle: int,
     review_ref: str,
 ) -> None:
-    """Mark a reviewed WP done after start-review claimed in_review."""
+    """Ask the host to mark a reviewed WP done without bypassing its gates."""
     note = f"Review approved by '{review_agent_id}'"
+    review_result_json = _review_result_json(
+        review_agent_id,
+        "approved",
+        review_ref,
+    )
     _host_transition(
         host,
         mission,
@@ -569,7 +591,18 @@ def _transition_review_approved(
         "done",
         note=note,
         review_ref=review_ref,
-        force=True,
+        review_result_json=review_result_json,
+        evidence_json=json.dumps(
+            {
+                "review": {
+                    "reviewer": review_agent_id,
+                    "verdict": "approved",
+                    "reference": review_ref,
+                }
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     )
 
 
@@ -577,28 +610,23 @@ def _transition_review_rejected(
     host: HostClient,
     mission: str,
     wp_id: str,
+    review_agent_id: str,
     feedback_ref: str,
 ) -> None:
     """Move a rejected WP from in_review back to in_progress for rework."""
-    try:
-        _host_transition(
-            host,
-            mission,
-            wp_id,
-            "in_progress",
-            note="Review rejected; rework required",
-            review_ref=feedback_ref,
-        )
-    except TransitionRejectedError:
-        _host_transition(
-            host,
-            mission,
-            wp_id,
-            "in_progress",
-            note="Review rejected; rework required",
-            review_ref=feedback_ref,
-            force=True,
-        )
+    _host_transition(
+        host,
+        mission,
+        wp_id,
+        "in_progress",
+        note="Review rejected; rework required",
+        review_ref=feedback_ref,
+        review_result_json=_review_result_json(
+            review_agent_id,
+            "changes_requested",
+            feedback_ref,
+        ),
+    )
 
 
 def _mark_failed(wp_exec: WPExecution, error: str) -> None:

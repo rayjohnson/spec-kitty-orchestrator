@@ -25,7 +25,7 @@ The orchestrator polls the host for ready work packages, spawns AI agents in wor
 ## Requirements
 
 - Python 3.10+
-- [spec-kitty](https://github.com/Priivacy-ai/spec-kitty) installed and on PATH with `orchestrator-api` contract ≥ 1.2.0
+- [spec-kitty](https://github.com/Priivacy-ai/spec-kitty) installed and on PATH with `orchestrator-api` contract ≥ 1.3.0
 - At least one supported AI agent CLI installed (see [Supported agents](#supported-agents))
 
 ---

@@ -171,7 +171,7 @@ def seed_minimal_spec_kitty_project(tmp_path: Path, *, bin_dir: Path, env: dict[
     (mission_dir / "tasks.md").write_text(
         "## WP01\n\n"
         "**Requirement Refs**: FR-001\n\n"
-        "- [ ] Deterministic implementation\n",
+        "- [ ] T001 Deterministic implementation\n",
         encoding="utf-8",
     )
     wp_path = tasks_dir / "WP01-deterministic-implementation.md"
@@ -247,6 +247,24 @@ def create_fake_agent_bin(bin_dir: Path, command_name: str) -> None:
                 git("commit", "-m", f"feat(WP01): {{AGENT}} deterministic implementation")
             except subprocess.CalledProcessError:
                 pass
+            subprocess.run(
+                [
+                    "spec-kitty",
+                    "agent",
+                    "tasks",
+                    "mark-status",
+                    "T001",
+                    "--status",
+                    "done",
+                    "--mission",
+                    "099-orchestrator-e2e",
+                    "--json",
+                ],
+                cwd=cwd,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
             emit({{"result": "implemented", "files_modified": ["src/wp01_impl.py"], "commits": ["fake-commit"]}})
             raise SystemExit(0)
 

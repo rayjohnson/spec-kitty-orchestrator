@@ -35,9 +35,9 @@ def test_host_client_contract_version_works_against_real_spec_kitty(fake_agent_p
 
     data = client.contract_version()
 
-    # Host contract is 1.2.0 (adds read-only resolve-workspace). The handshake
-    # succeeds because the orchestrator's _MIN_CONTRACT_VERSION is also 1.2.0.
-    assert data.api_version == "1.2.0"
+    # Host contract is 1.3.0 (adds structured review-result transitions). The
+    # handshake succeeds because the provider requires the same minimum.
+    assert data.api_version == "1.3.0"
 
 
 def test_host_client_can_query_seeded_ready_wp(fake_agent_project) -> None:

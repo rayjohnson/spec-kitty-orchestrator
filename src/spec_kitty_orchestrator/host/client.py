@@ -32,10 +32,9 @@ from .models import (
     TransitionData,
 )
 
-# The minimum contract version this provider supports. Bumped to 1.2.0: the loop
-# resumes for_review WPs via the read-only ``resolve-workspace`` command, which
-# the host provides only at contract >= 1.2.0.
-_MIN_CONTRACT_VERSION = "1.2.0"
+# The minimum contract version this provider supports. Contract 1.3.0 adds the
+# structured review result required for guarded exits from ``in_review``.
+_MIN_CONTRACT_VERSION = "1.3.0"
 _SPEC_KITTY_BIN = "spec-kitty"
 
 
@@ -297,6 +296,7 @@ class HostClient:
         review_ref: str | None = None,
         force: bool = False,
         evidence_json: str | None = None,
+        review_result_json: str | None = None,
         subtasks_complete: bool | None = None,
         implementation_evidence_present: bool | None = None,
     ) -> TransitionData:
@@ -312,6 +312,7 @@ class HostClient:
             review_ref: Optional review reference (for for_review->done).
             force: Whether to force the transition.
             evidence_json: Optional JSON evidence payload for done transitions.
+            review_result_json: Structured outcome for transitions from in_review.
             subtasks_complete: Optional guard value for in_progress->for_review.
             implementation_evidence_present: Optional guard value for in_progress->for_review.
         """
@@ -332,6 +333,8 @@ class HostClient:
             args.append("--force")
         if evidence_json:
             args += ["--evidence-json", evidence_json]
+        if review_result_json:
+            args += ["--review-result-json", review_result_json]
         if subtasks_complete is not None:
             args.append("--subtasks-complete" if subtasks_complete else "--no-subtasks-complete")
         if implementation_evidence_present is not None:
