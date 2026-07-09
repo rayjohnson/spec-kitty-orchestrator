@@ -3,7 +3,7 @@
 Validates that HostClient correctly parses all canonical fixture responses
 and maps them to the right typed data models and exceptions.
 
-The 13 fixture JSON files are the source of truth for the contract shape.
+    The fixture JSON files are the source of truth for the contract shape.
 Both sides of the contract (host and provider) must conform to these fixtures.
 """
 
@@ -30,6 +30,7 @@ from spec_kitty_orchestrator.host.models import (
     MissionStateData,
     ListReadyData,
     MergeData,
+    ResolveWorkspaceData,
     StartImplData,
     StartReviewData,
     TransitionData,
@@ -76,6 +77,7 @@ class TestEnvelopeShape:
         "mission_state_success",
         "list_ready_success",
         "start_implementation_success",
+        "resolve_workspace_success",
         "start_review_success",
         "transition_success",
         "append_history_success",
@@ -107,6 +109,7 @@ class TestEnvelopeShape:
         "mission_state_success",
         "list_ready_success",
         "start_implementation_success",
+        "resolve_workspace_success",
         "start_review_success",
         "transition_success",
         "append_history_success",
@@ -144,7 +147,7 @@ class TestContractVersion:
         with _patch_call(client, "contract_version_success"):
             result = client.contract_version()
         assert isinstance(result, ContractVersionData)
-        assert result.api_version == "1.0.0"
+        assert result.api_version == "1.3.0"
         assert result.min_supported_provider_version == "0.1.0"
 
     def test_mismatch_raises_contract_mismatch_error(self) -> None:
@@ -243,6 +246,34 @@ class TestHostInvocation:
         assert cmd == ["spec-kitty", "orchestrator-api", "contract-version"]
         assert "--json" not in cmd
 
+    def test_append_history_runs_from_primary_checkout(self) -> None:
+        """append-history must execute from repo_root (the primary checkout).
+
+        This is the positive form of the SAFE_COMMIT_PATH_POLICY fix: append-history
+        commits a planning artifact (a WP prompt file), and spec-kitty refuses to do
+        that from inside a worktree. So its subprocess cwd and SPECIFY_REPO_ROOT must
+        be repo_root, never a worktree path. Unlike the worktree-absence regression
+        test, this pins the behavioral contract directly, so it stays meaningful as
+        the CLI's worktree handling evolves.
+        """
+        root = Path("/tmp/primary-checkout")
+        client = _make_client(repo_root=root)
+        fixture = _load_fixture("append_history_success")
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(fixture)
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch(
+            "spec_kitty_orchestrator.host.client.subprocess.run",
+            return_value=mock_result,
+        ) as run:
+            client.append_history("099-test-feature", "WP01", "note")
+
+        run.assert_called_once()
+        assert run.call_args.kwargs["cwd"] == root
+        assert run.call_args.kwargs["env"]["SPECIFY_REPO_ROOT"] == str(root)
+
 
 # -- start-implementation -----------------------------------------------------
 
@@ -259,7 +290,8 @@ class TestStartImplementation:
         assert result.to_lane == "in_progress"
         assert result.policy_metadata_recorded is True
         assert result.no_op is False
-        assert "WP01" in result.workspace_path
+        # Contract >= 1.1.0: workspace_path is the lane worktree (not per-WP).
+        assert result.workspace_path.endswith("lane-a")
         assert result.prompt_path.endswith("WP01.md")
 
     def test_policy_required_raises(self) -> None:
@@ -285,6 +317,39 @@ class TestStartImplementation:
             result = client.start_implementation("099-test-feature", "WP01")
         assert result.no_op is True
 
+    def test_parses_lane_fields_when_present(self) -> None:
+        """Contract >= 1.1.0: lane WPs carry lane_id/lane_branch/lane_base_ref."""
+        client = _make_client()
+        fixture = _load_fixture("start_implementation_success")
+        fixture["data"].update({
+            "lane_id": "lane-a",
+            "lane_branch": "kitty/mission-feat-01ABCDEF-lane-a",
+            "lane_base_ref": "kitty/mission-feat-01ABCDEF",
+        })
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**fixture)):
+            result = client.start_implementation("099-test-feature", "WP01")
+        assert result.lane_id == "lane-a"
+        assert result.lane_branch == "kitty/mission-feat-01ABCDEF-lane-a"
+        assert result.lane_base_ref == "kitty/mission-feat-01ABCDEF"
+
+    def test_lane_fields_default_none_when_absent(self) -> None:
+        """Planning/non-lane WPs omit lane_* — must parse as None."""
+        client = _make_client()
+        fixture = _load_fixture("start_implementation_success")
+        for key in ("lane_id", "lane_branch", "lane_base_ref"):
+            fixture["data"].pop(key, None)
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**fixture)):
+            result = client.start_implementation("099-test-feature", "WP01")
+        assert result.lane_id is None
+        assert result.lane_branch is None
+        assert result.lane_base_ref is None
+
 
 # -- start-review -------------------------------------------------------------
 
@@ -296,8 +361,26 @@ class TestStartReview:
             result = client.start_review("099-test-feature", "WP01", review_ref="review-001")
         assert isinstance(result, StartReviewData)
         assert result.from_lane == "for_review"
-        assert result.to_lane == "in_progress"
+        assert result.to_lane == "in_review"
         assert result.policy_metadata_recorded is True
+
+
+# -- resolve-workspace -------------------------------------------------------
+
+
+class TestResolveWorkspace:
+    def test_parses_success_fixture(self) -> None:
+        client = _make_client()
+        with _patch_call(client, "resolve_workspace_success"):
+            result = client.resolve_workspace("099-test-feature", "WP01")
+        assert isinstance(result, ResolveWorkspaceData)
+        assert result.mission_slug == "099-test-feature"
+        assert result.wp_id == "WP01"
+        assert result.workspace_path.endswith("lane-a")
+        assert result.prompt_path.endswith("WP01.md")
+        assert result.lane_id == "lane-a"
+        assert result.lane_branch == "kitty/mission-099-test-feature-lane-a"
+        assert result.lane_base_ref == "kitty/mission-099-test-feature"
 
 
 # -- transition ----------------------------------------------------------------
@@ -321,6 +404,29 @@ class TestTransition:
             with pytest.raises(TransitionRejectedError) as exc_info:
                 client.transition("099-test-feature", "WP01", "done")
         assert exc_info.value.error_code == "TRANSITION_REJECTED"
+
+    def test_sends_structured_review_result_and_done_evidence(self) -> None:
+        client = _make_client()
+        fixture = _load_fixture("transition_success")
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(
+            client,
+            "_call",
+            return_value=HostResponse(**fixture),
+        ) as call:
+            client.transition(
+                "099-test-feature",
+                "WP01",
+                "done",
+                review_result_json='{"reviewer":"codex"}',
+                evidence_json='{"review":{}}',
+            )
+
+        args = call.call_args.args[0]
+        assert args[args.index("--review-result-json") + 1] == '{"reviewer":"codex"}'
+        assert args[args.index("--evidence-json") + 1] == '{"review":{}}'
 
 
 # -- append-history ------------------------------------------------------------
@@ -483,7 +589,7 @@ class TestContractVersionEnforcement:
         client = _make_client()
         with _patch_call(client, "contract_version_success"):
             result = client.contract_version()
-        assert result.api_version == "1.0.0"
+        assert result.api_version == "1.3.0"
 
     def test_newer_host_version_succeeds(self) -> None:
         """If host reports a newer version (same major), no error is raised."""
@@ -492,11 +598,11 @@ class TestContractVersionEnforcement:
 
         newer_fixture = dict(fixture)
         newer_fixture["data"] = dict(fixture["data"])
-        newer_fixture["data"]["api_version"] = "1.2.0"
+        newer_fixture["data"]["api_version"] = "1.4.0"
 
         from spec_kitty_orchestrator.host.models import HostResponse
 
         with patch.object(client, "_call", return_value=HostResponse(**newer_fixture)):
             result = client.contract_version()
 
-        assert result.api_version == "1.2.0"
+        assert result.api_version == "1.4.0"

@@ -4,4 +4,4 @@ Interacts with spec-kitty exclusively via the versioned orchestrator-api CLI con
 No direct file mutation; all state changes go through HostClient.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

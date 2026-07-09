@@ -15,6 +15,13 @@ def assert_done_with_policy(project) -> None:
     assert any(event.get("to_lane") == "for_review" for event in events)
     assert any(event.get("to_lane") == "done" for event in events)
     assert any(event.get("policy_metadata") for event in events), events
+    assert not any(event.get("force") for event in events), events
+    done_events = [event for event in events if event.get("to_lane") == "done"]
+    evidence = done_events[-1].get("evidence")
+    assert isinstance(evidence, dict)
+    review = evidence.get("review")
+    assert isinstance(review, dict)
+    assert review.get("verdict") == "approved"
     assert (project.root / ".kittify" / "orchestrator-run-state.json").exists()
     assert list((project.root / ".kittify" / "logs").glob("*.log"))
 

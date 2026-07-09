@@ -22,6 +22,65 @@ class NoAgentAvailableError(SchedulerError):
     """Raised when no agent is available for the requested role."""
 
 
+# Lanes whose WPs the orchestrator actively drives through execute_and_advance.
+# A WP left in one of these by a prior/interrupted run (or an out-of-band
+# start-implementation, e.g. during host-side testing) is "orphaned": list-ready
+# never returns a claimed/in_progress/for_review WP, so without adoption the loop
+# can never make progress on it and falsely reports a dependency deadlock.
+#
+# ``for_review`` is resumable too: a WP parked in for_review by an interrupted run
+# needs a REVIEWER dispatched on resume (not an implementer). The loop routes an
+# adopted for_review WP straight to the review phase (execute_and_advance with
+# current_lane="for_review"), so review->approve->done proceeds and dependent
+# planned WPs unblock. claimed/in_progress are re-implemented; for_review is
+# reviewed.
+RESUMABLE_LANES = frozenset({"claimed", "in_progress", "for_review"})
+
+
+def select_schedulable_wp_ids(
+    ready_wps: list,
+    state_wps: list,
+    active_ids: set[str],
+    driven_ids: set[str],
+) -> list[str]:
+    """Return the WP IDs the loop should schedule this iteration.
+
+    Combines two sources:
+    - ``ready_wps`` (from list-ready): planned WPs whose dependencies are met.
+    - ``state_wps`` (from mission-state): WPs orphaned in a RESUMABLE lane by a
+      prior/interrupted run, which list-ready never surfaces. Adopting these is
+      what lets an interrupted mission resume instead of dead-locking.
+
+    Excludes WPs already active in this process (``active_ids``), and WPs this
+    process has already driven (``driven_ids``) so a WP whose allocation or run
+    failed is not re-adopted into an infinite loop — it is surfaced as stalled
+    instead.
+
+    Order: ready WPs first (in list-ready order), then orphaned resumables;
+    de-duplicated.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for wp in ready_wps:
+        if (
+            wp.wp_id not in seen
+            and wp.wp_id not in active_ids
+            and wp.wp_id not in driven_ids
+        ):
+            ordered.append(wp.wp_id)
+            seen.add(wp.wp_id)
+    for wp in state_wps:
+        if (
+            wp.lane in RESUMABLE_LANES
+            and wp.wp_id not in seen
+            and wp.wp_id not in active_ids
+            and wp.wp_id not in driven_ids
+        ):
+            ordered.append(wp.wp_id)
+            seen.add(wp.wp_id)
+    return ordered
+
+
 class ConcurrencyManager:
     """Semaphore-based concurrency limiter for in-flight WPs.
 
@@ -122,6 +181,8 @@ __all__ = [
     "ConcurrencyManager",
     "SchedulerError",
     "NoAgentAvailableError",
+    "RESUMABLE_LANES",
     "select_implementer",
     "select_reviewer",
+    "select_schedulable_wp_ids",
 ]

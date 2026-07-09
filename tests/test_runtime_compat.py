@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from spec_kitty_orchestrator.executor import ensure_working_dir
 from spec_kitty_orchestrator.host.client import TransitionRejectedError
 from spec_kitty_orchestrator.loop import (
@@ -81,64 +83,158 @@ class ReviewLaneHost:
                 "TRANSITION_REJECTED",
                 "for_review cannot go directly to done",
             )
-        if (
-            to in {"done", "in_progress"}
-            and self.lane == "in_review"
-            and not kwargs.get("force")
-        ):
-            raise TransitionRejectedError(
-                "TRANSITION_REJECTED",
-                "in_review requires review_result",
-            )
         self.lane = to
         return SimpleNamespace(to_lane=to)
 
 
-def test_review_approval_claims_in_review_then_forces_done_when_host_requires_review_result() -> None:
-    host = ReviewLaneHost()
+def test_review_approval_moves_current_in_review_lane_to_done() -> None:
+    host = ReviewLaneHost(lane="in_review")
 
     _transition_review_approved(host, "099-feature", "WP01", "codex", 1, "review-ref")
 
     assert host.lane == "done"
-    assert host.calls[0][0:2] == ("transition", "done")
-    assert host.calls[1][0] == "start_review"
-    assert host.calls[2] == (
-        "transition",
-        "done",
-        {
-            "note": "Review approved by 'codex'",
-            "review_ref": "review-ref",
-            "force": True,
-        },
-    )
+    assert host.calls == [
+        (
+            "transition",
+            "done",
+            {
+                "evidence_json": '{"review":{"reference":"review-ref","reviewer":"codex","verdict":"approved"}}',
+                "note": "Review approved by 'codex'",
+                "review_ref": "review-ref",
+                "review_result_json": '{"reference":"review-ref","reviewer":"codex","verdict":"approved"}',
+            },
+        )
+    ]
+
+
+def test_review_approval_surfaces_host_rejection_without_forcing() -> None:
+    class GuardedCompletionHost(ReviewLaneHost):
+        def transition(
+            self,
+            mission: str,
+            wp_id: str,
+            to: str,
+            **kwargs: Any,
+        ) -> SimpleNamespace:
+            self.calls.append(("transition", to, kwargs))
+            raise TransitionRejectedError(
+                "TRANSITION_REJECTED",
+                "host completion gate rejected transition",
+            )
+
+    host = GuardedCompletionHost(lane="in_review")
+
+    with pytest.raises(TransitionRejectedError, match="host completion gate"):
+        _transition_review_approved(
+            host,
+            "099-feature",
+            "WP01",
+            "codex",
+            1,
+            "review-ref",
+        )
+
+    assert host.lane == "in_review"
+    assert host.calls == [
+        (
+            "transition",
+            "done",
+            {
+                "evidence_json": '{"review":{"reference":"review-ref","reviewer":"codex","verdict":"approved"}}',
+                "note": "Review approved by 'codex'",
+                "review_ref": "review-ref",
+                "review_result_json": '{"reference":"review-ref","reviewer":"codex","verdict":"approved"}',
+            },
+        )
+    ]
 
 
 def test_review_rejection_moves_current_in_review_lane_back_to_in_progress() -> None:
-    host = ReviewLaneHost()
+    host = ReviewLaneHost(lane="in_review")
 
-    _transition_review_rejected(host, "099-feature", "WP01", "feedback-ref")
+    _transition_review_rejected(
+        host,
+        "099-feature",
+        "WP01",
+        "codex",
+        "feedback-ref",
+    )
 
     assert host.lane == "in_progress"
     assert host.calls == [
-        ("start_review", "feedback-ref", {}),
         (
             "transition",
             "in_progress",
             {
                 "note": "Review rejected; rework required",
                 "review_ref": "feedback-ref",
-                "force": True,
+                "review_result_json": '{"reference":"feedback-ref","reviewer":"codex","verdict":"changes_requested"}',
             },
         ),
     ]
 
 
-def test_for_review_transition_retries_with_force_when_strict_guards_reject() -> None:
+def test_review_rejection_surfaces_host_rejection_without_forcing() -> None:
+    class StrictReviewHost(ReviewLaneHost):
+        def transition(self, mission: str, wp_id: str, to: str, **kwargs: Any) -> SimpleNamespace:
+            self.calls.append(("transition", to, kwargs))
+            raise TransitionRejectedError("TRANSITION_REJECTED", "strict rework guard")
+
+    host = StrictReviewHost(lane="in_review")
+
+    with pytest.raises(TransitionRejectedError, match="strict rework guard"):
+        _transition_review_rejected(
+            host,
+            "099-feature",
+            "WP01",
+            "codex",
+            "feedback-ref",
+        )
+
+    assert host.lane == "in_review"
+    assert host.calls == [
+        (
+            "transition",
+            "in_progress",
+            {
+                "note": "Review rejected; rework required",
+                "review_ref": "feedback-ref",
+                "review_result_json": '{"reference":"feedback-ref","reviewer":"codex","verdict":"changes_requested"}',
+            },
+        ),
+    ]
+
+
+def test_review_approval_does_not_claim_review_again() -> None:
+    host = ReviewLaneHost(lane="in_review")
+
+    _transition_review_approved(host, "099-feature", "WP01", "codex", 1, "review-ref")
+
+    assert host.calls == [
+        (
+            "transition",
+            "done",
+            {
+                "evidence_json": '{"review":{"reference":"review-ref","reviewer":"codex","verdict":"approved"}}',
+                "note": "Review approved by 'codex'",
+                "review_ref": "review-ref",
+                "review_result_json": '{"reference":"review-ref","reviewer":"codex","verdict":"approved"}',
+            },
+        )
+    ]
+
+
+def test_for_review_transition_surfaces_host_rejection_without_forcing() -> None:
     host = ReviewLaneHost(lane="in_progress", reject_first_for_review=True)
 
-    _transition_for_review(host, "099-feature", "WP01", "implementation complete")
+    with pytest.raises(TransitionRejectedError, match="strict for_review guard"):
+        _transition_for_review(host, "099-feature", "WP01", "implementation complete")
 
-    assert host.lane == "for_review"
-    assert host.calls[0][2]["subtasks_complete"] is True
-    assert host.calls[0][2]["implementation_evidence_present"] is True
-    assert host.calls[1][2]["force"] is True
+    assert host.lane == "in_progress"
+    assert host.calls == [
+        (
+            "transition",
+            "for_review",
+            {"note": "implementation complete", "review_ref": None},
+        ),
+    ]

@@ -74,6 +74,11 @@ class StartImplData(BaseModel):
     prompt_path: str
     policy_metadata_recorded: bool
     no_op: bool
+    # Lane fields (contract >= 1.1.0). Present for lane WPs; omitted for
+    # planning/non-lane WPs, so they are optional.
+    lane_id: str | None = None
+    lane_branch: str | None = None
+    lane_base_ref: str | None = None
 
 
 class StartReviewData(BaseModel):
@@ -86,6 +91,23 @@ class StartReviewData(BaseModel):
     prompt_path: str
     policy_metadata_recorded: bool
     no_op: bool = False
+
+
+class ResolveWorkspaceData(BaseModel):
+    """Data returned by the read-only resolve-workspace command (contract >= 1.2.0).
+
+    Resolves an existing WP's lane workspace without transitioning it — used to
+    resume a WP already past implementation (e.g. parked in for_review).
+    """
+
+    mission_slug: str
+    wp_id: str
+    workspace_path: str
+    prompt_path: str
+    # Lane fields — present for lane WPs, omitted for legacy/non-lane WPs.
+    lane_id: str | None = None
+    lane_branch: str | None = None
+    lane_base_ref: str | None = None
 
 
 class TransitionData(BaseModel):
@@ -133,6 +155,7 @@ __all__ = [
     "MissionStateData",
     "ReadyWorkPackage",
     "ListReadyData",
+    "ResolveWorkspaceData",
     "StartImplData",
     "StartReviewData",
     "TransitionData",
