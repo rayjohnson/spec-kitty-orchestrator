@@ -28,6 +28,27 @@ from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
+_CAFFEINATE_PATH = "/usr/bin/caffeinate"
+_CLEANUP_TIMEOUT_SECONDS = 1.0
+
+
+def _release_assertion(proc: subprocess.Popen[bytes]) -> None:
+    """Stop and reap the assertion helper without disrupting orchestration."""
+    with contextlib.suppress(OSError):
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=_CLEANUP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        try:
+            proc.wait(timeout=_CLEANUP_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Could not reap idle-sleep assertion helper: %s", exc)
+    except OSError as exc:
+        logger.debug("Idle-sleep assertion helper was already reaped: %s", exc)
+
 
 @contextlib.contextmanager
 def prevent_idle_sleep(enabled: bool = True) -> Iterator[None]:
@@ -44,7 +65,8 @@ def prevent_idle_sleep(enabled: bool = True) -> Iterator[None]:
     if enabled and sys.platform == "darwin":
         try:
             proc = subprocess.Popen(
-                ["caffeinate", "-i", "-w", str(os.getpid())],
+                [_CAFFEINATE_PATH, "-i", "-w", str(os.getpid())],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -68,5 +90,4 @@ def prevent_idle_sleep(enabled: bool = True) -> Iterator[None]:
             # -w releases on our exit anyway; terminate eagerly so the
             # assertion drops the moment the loop finishes, not at
             # process teardown.
-            with contextlib.suppress(OSError):
-                proc.terminate()
+            _release_assertion(proc)

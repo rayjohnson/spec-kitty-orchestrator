@@ -15,6 +15,7 @@ def _spawn_spy(monkeypatch, *, raise_exc: OSError | None = None):
     calls: list[list[str]] = []
     proc = MagicMock()
     proc.pid = 4242
+    proc.wait.return_value = 0
 
     def _fake_popen(args, **_kwargs):
         if raise_exc is not None:
@@ -31,11 +32,12 @@ def test_holds_assertion_on_darwin(monkeypatch) -> None:
     calls, proc = _spawn_spy(monkeypatch)
 
     with prevent_idle_sleep():
-        assert calls == [["caffeinate", "-i", "-w", str(os.getpid())]]
+        assert calls == [["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())]]
         proc.terminate.assert_not_called()
 
     # Released eagerly on clean exit.
     proc.terminate.assert_called_once()
+    proc.wait.assert_called_once_with(timeout=1.0)
 
 
 def test_releases_assertion_on_exception(monkeypatch) -> None:
@@ -49,6 +51,7 @@ def test_releases_assertion_on_exception(monkeypatch) -> None:
         pass
 
     proc.terminate.assert_called_once()
+    proc.wait.assert_called_once_with(timeout=1.0)
 
 
 def test_disabled_is_a_noop(monkeypatch) -> None:
@@ -95,3 +98,22 @@ def test_terminate_failure_is_swallowed(monkeypatch) -> None:
 
     with prevent_idle_sleep():
         pass  # exiting must not raise
+
+    proc.wait.assert_called_once_with(timeout=1.0)
+
+
+def test_cleanup_kills_and_reaps_helper_that_ignores_terminate(monkeypatch) -> None:
+    """Cleanup remains bounded even if the helper ignores SIGTERM."""
+    monkeypatch.setattr(power.sys, "platform", "darwin")
+    _calls, proc = _spawn_spy(monkeypatch)
+    proc.wait.side_effect = [
+        subprocess.TimeoutExpired(cmd="/usr/bin/caffeinate", timeout=1.0),
+        0,
+    ]
+
+    with prevent_idle_sleep():
+        pass
+
+    proc.terminate.assert_called_once()
+    proc.kill.assert_called_once()
+    assert proc.wait.call_count == 2
