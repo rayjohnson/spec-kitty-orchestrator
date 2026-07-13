@@ -20,10 +20,10 @@ def test_lock_rejects_concurrent_live_owner(tmp_path: Path) -> None:
                 pytest.fail("concurrent lock unexpectedly acquired")
 
 
-def test_lock_recovers_dead_owner_and_cleans_up(tmp_path: Path) -> None:
+def test_lock_ignores_stale_diagnostics_and_cleans_up(tmp_path: Path) -> None:
     lock_file = tmp_path / "orchestrator.lock"
     lock_file.write_text(
-        json.dumps({"pid": 999_999_999, "mission": "stale", "token": "old"}),
+        json.dumps({"pid": 999_999_999, "mission": "stale"}),
         encoding="utf-8",
     )
 
