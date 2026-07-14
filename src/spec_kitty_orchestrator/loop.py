@@ -716,11 +716,51 @@ def _mark_failed(wp_exec: WPExecution, error: str) -> None:
     wp_exec.last_error = error[:500]
 
 
+def _recover_orphaned_reviews(host: HostClient, mission: str) -> None:
+    """Recover in-review WPs owned by this exclusively locked orchestrator.
+
+    When the orchestrator is killed while a reviewer is in-flight, the WP is
+    left in in_review with no live agent. The scheduler never adopts in_review
+    (it is not in RESUMABLE_LANES), so a naive restart stalls immediately.
+
+    The CLI holds a repository orchestration lock while this runs, proving no
+    other orchestrator process is live. Actor matching avoids stealing reviews
+    claimed through another host identity. Matching WPs are force-transitioned
+    to for_review for the existing orphan-adoption path.
+    """
+    state_data = host.mission_state(mission)
+    for wp in state_data.work_packages:
+        if (
+            wp.lane != "in_review"
+            or getattr(wp, "last_actor", None) != getattr(host, "actor", None)
+        ):
+            continue
+        logger.warning(
+            "WP %s is in_review with no active agent — forcing back to for_review for re-review",
+            wp.wp_id,
+        )
+        try:
+            _host_transition(
+                host,
+                mission,
+                wp.wp_id,
+                "for_review",
+                force=True,
+                note="reviewer agent interrupted when orchestrator was killed; re-queuing for review",
+            )
+        except Exception as exc:
+            raise OrchestrationError(
+                f"WP {wp.wp_id}: could not recover orphaned review: {exc}"
+            ) from exc
+
+
 async def run_orchestration_loop(
     mission: str,
     host: HostClient,
     run_state: RunState,
     cfg: OrchestratorConfig,
+    *,
+    recover_in_review: bool = False,
 ) -> None:
     """Main async orchestration loop.
 
@@ -732,6 +772,8 @@ async def run_orchestration_loop(
         host: HostClient for all host interactions.
         run_state: Provider-local run state.
         cfg: Full orchestrator config.
+        recover_in_review: Recover reviews owned by this actor. Callers must
+            hold the repository orchestration lock before enabling this.
     """
     concurrency = ConcurrencyManager(cfg.max_concurrent_wps)
     agent_cfg = cfg.agent_selection
@@ -743,6 +785,8 @@ async def run_orchestration_loop(
     driven_ids: set[str] = set()
 
     logger.info("Orchestration loop started for mission '%s'", mission)
+    if recover_in_review:
+        _recover_orphaned_reviews(host, mission)
 
     while True:
         ready_data = host.list_ready(mission)
