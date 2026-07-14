@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import shlex
 import uuid
 from pathlib import Path
 from typing import Any
@@ -157,6 +159,10 @@ async def execute_and_advance(
         _mark_failed(wp_exec, str(exc))
         save_state(run_state, cfg.state_file)
         return
+
+    subtask_ids = _extract_subtask_ids(prompt_text)
+    if subtask_ids:
+        prompt_text = _inject_subtask_tracking(prompt_text, subtask_ids, mission)
 
     # -- Implementation phase ----------------------------------------------
     # Defect 3: a WP resumed straight from for_review (by an interrupted run) is
@@ -627,6 +633,82 @@ def _transition_review_rejected(
             feedback_ref,
         ),
     )
+
+
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(?P<body>.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+_SUBTASK_KEY_RE = re.compile(r"^subtasks:\s*(?P<inline>\[[^\n]*\])?\s*$")
+_SUBTASK_ITEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+
+
+def _normalize_subtask_id(value: str) -> str | None:
+    """Strip YAML scalar quotes and reject values unsafe for CLI guidance."""
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {'"', "'"}:
+        candidate = candidate[1:-1]
+    return candidate if _SUBTASK_ITEM_RE.fullmatch(candidate) else None
+
+
+def _extract_subtask_ids(prompt_text: str) -> list[str]:
+    """Return normalized IDs from canonical block or inline YAML frontmatter."""
+    frontmatter_match = _FRONTMATTER_RE.match(prompt_text)
+    if not frontmatter_match:
+        return []
+
+    lines = frontmatter_match.group("body").splitlines()
+    for index, line in enumerate(lines):
+        key_match = _SUBTASK_KEY_RE.fullmatch(line.strip())
+        if not key_match:
+            continue
+
+        inline = key_match.group("inline")
+        raw_values: list[str]
+        if inline is not None:
+            raw_values = inline[1:-1].split(",") if inline[1:-1].strip() else []
+        else:
+            raw_values = []
+            for item_line in lines[index + 1 :]:
+                item_match = re.fullmatch(r"[ \t]*-[ \t]+(.+?)[ \t]*", item_line)
+                if not item_match:
+                    break
+                raw_values.append(item_match.group(1))
+
+        normalized = [_normalize_subtask_id(value) for value in raw_values]
+        return [value for value in normalized if value is not None]
+    return []
+
+
+def _inject_subtask_tracking(prompt_text: str, subtask_ids: list[str], mission: str) -> str:
+    """Prepend best-effort per-subtask mark-status guidance to the prompt.
+
+    A cooperative agent calls ``mark-status`` after each completed subtask so
+    dashboard progress updates during its WP-level run. The orchestrator does
+    not mark anything itself: unchecked tasks remain genuine host-gate evidence.
+    """
+    if not subtask_ids:
+        return prompt_text
+    lines = [
+        "## Agent Subtask Completion Protocol",
+        "",
+        "After completing **each** subtask, run this command immediately—do **not**",
+        "wait until all subtasks are done:",
+        "",
+    ]
+    for t_id in subtask_ids:
+        lines.append(
+            f"    spec-kitty agent tasks mark-status {shlex.quote(t_id)}"
+            f" --status done --mission {shlex.quote(mission)}"
+        )
+    lines += [
+        "",
+        "Mark incrementally as you go so that dashboard progress is visible in real time.",
+        "",
+        "---",
+        "",
+    ]
+    return "\n".join(lines) + prompt_text
 
 
 def _mark_failed(wp_exec: WPExecution, error: str) -> None:
